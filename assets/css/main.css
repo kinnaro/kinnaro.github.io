@@ -230,7 +230,6 @@ body {
 /* Type */
 body, input, select, textarea {
   color: rgba(255, 255, 255, 0.75);
-  text-align:center;
   font-family: "Roboto", sans-serif;
   font-size: 16pt;
   font-weight: 400;
