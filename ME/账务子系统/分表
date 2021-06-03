@@ -1,0 +1,214 @@
+# Sharding sphere实现多分片进行分表
+
+```JAVA
+/**
+ * @Author zhaomf
+ * @Date 20210601
+ */
+```
+
+## 简介
+
+### 场景：
+
+1. **生成明细账场景：**
+
+   使用处理月（PERIOD_NAME）作为分表字段。如，UPL处理月为201912，则生成的明细账数据插入到ACTS_UPL_DETAIL_201912表中；
+
+2. **报表：**
+
+   - UPL报表查询中，使用处理月，出票日期，飞行日期中的一个或几个作为主要查询条件。
+
+   - 优先级：处理月-出票日期-飞行日期。
+
+   - 处理月为201912，则查询ACTS_UPL_DETAIL_201912表中数据；
+
+   - 没有处理月，出票日期为2019/12/12，则查询201912-202106（至今）表中的数据；
+
+   - 飞行日期同出票日期；
+
+### 版本：
+
+​	Sharding sphere 4.0.0-RC1
+
+### 分片字段：
+
+​	PERIOD_NAME，DATE_OF_ISSUE，FLIGHT_DATE
+
+### 分片策略
+
+​	多分片
+
+## 实现
+
+### maven依赖
+
+```xml
+<sharding-sphere.version>4.0.0-RC1</sharding-sphere.version>
+
+<dependency>
+    <groupId>org.apache.shardingsphere</groupId>
+    <artifactId>sharding-jdbc-spring-boot-starter</artifactId>
+    <version>${sharding-sphere.version}</version>
+</dependency>
+<dependency>
+    <groupId>org.apache.shardingsphere</groupId>
+    <artifactId>sharding-jdbc-spring-namespace</artifactId>
+    <version>${sharding-sphere.version}</version>
+</dependency>
+
+<!-- 版本与架构冲突额外需要引入 -->
+<dependency>
+    <groupId>com.google.guava</groupId>
+    <artifactId>guava</artifactId>
+    <version>20.0</version>
+</dependency>
+```
+
+### yml配置
+
+```yaml
+shardingsphere:
+    datasource:
+      names: db0
+      db0:
+        type: com.alibaba.druid.pool.DruidDataSource
+        driver-class-name: oracle.jdbc.OracleDriver
+        url: jdbc:oracle:thin:@10.1.19.129:1521/acts
+        username: acts
+        password: Acts_67890
+        maxWait: 60000
+        timeBetweenEvictionRunsMillis: 60000
+        minEvictableIdleTimeMillis: 300000
+        testWhileIdle: true
+        testOnBorrow: false
+        testOnReturn: false
+        poolPreparedStatements: true
+        maxPoolPreparedStatementPerConnectionSize: 20
+        filters: stat,wall
+        connectionProperties: druid.stat.mergeSql=true;druid.stat.slowSqlMillis=5000
+      ## 分表策略 其中user为逻辑表 分表主要取决与name字段
+    sharding:
+      tables:
+        ACTS_UPL_DETAIL: # 表名
+          actual-data-nodes: db0.ACTS_UPL_DETAIL_$->{2019}$->{10..11}
+          table-strategy:
+            complex: # 用于多分片键的复合分片场景, 分片列名称，多个列以逗号分隔
+              ShardingColumns: PERIOD_NAME, DATE_OF_ISSUE, FLIGHT_DATE # 分片键
+              algorithmClassName: 路径.TableComplexAlgorithm #复合分片算法类名称
+    props:
+      sql:
+        show: true
+```
+
+###多分片接口实现
+
+ComplexKeysShardingAlgorithm 需要被实现，根据分片字段动态更新表名
+
+```java
+import araf.utils.DateUtils;
+import lombok.SneakyThrows;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.poi.ss.formula.functions.T;
+import org.apache.shardingsphere.api.sharding.complex.ComplexKeysShardingAlgorithm;
+import org.apache.shardingsphere.api.sharding.complex.ComplexKeysShardingValue;
+import org.springframework.stereotype.Component;
+
+import java.text.SimpleDateFormat;
+import java.util.*;
+
+/**
+ * @Author zhaomf
+ * @Date 20210518
+ */
+@Component
+public class TableComplexAlgorithm implements ComplexKeysShardingAlgorithm {
+    private static final String DETAIL = "ACTS_UPL_DETAIL_";
+    private static final String PERIOD_NAME_LOW = "period_name";
+    private static final String PERIOD_NAME_LARGE = "PERIOD_NAME";
+    private static final String DATE_OF_ISSUE_LOW = "date_of_issue";
+    private static final String DATE_OF_ISSUE_LARGE = "DATE_OF_ISSUE";
+    private static final String FLIGHT_DATE_LOW = "flight_date";
+
+    @SneakyThrows
+    @Override
+    public Collection<String> doSharding(Collection collection, ComplexKeysShardingValue complexKeysShardingValue) {
+        Collection<String> routTables = new HashSet<>();
+        String targetTable;
+        String periodName = PERIOD_NAME_LOW;
+        String dateKey = DATE_OF_ISSUE_LOW;
+        Map<String, Collection<T>> columnNameAndShardingValuesMap =
+            complexKeysShardingValue.getColumnNameAndShardingValuesMap();
+        if (columnNameAndShardingValuesMap.containsKey(PERIOD_NAME_LOW) 
+            || columnNameAndShardingValuesMap.containsKey(PERIOD_NAME_LARGE)) {
+            if (columnNameAndShardingValuesMap.containsKey(PERIOD_NAME_LARGE)) {
+                periodName = PERIOD_NAME_LARGE;
+            }
+            periodName = complexKeysShardingValue
+                .getColumnNameAndShardingValuesMap().get(periodName).toString();
+            periodName = StringUtils.strip(periodName, "[]");
+            targetTable = DETAIL + periodName;
+            routTables.add(targetTable);
+        } else if (columnNameAndShardingValuesMap.containsKey(DATE_OF_ISSUE_LOW)
+                   || columnNameAndShardingValuesMap.containsKey(DATE_OF_ISSUE_LARGE) 
+                   || columnNameAndShardingValuesMap.containsKey(FLIGHT_DATE_LOW)) {
+            if (columnNameAndShardingValuesMap.containsKey(DATE_OF_ISSUE_LARGE)) {
+                dateKey = DATE_OF_ISSUE_LARGE;
+            } else if (columnNameAndShardingValuesMap.containsKey(DATE_OF_ISSUE_LOW))
+            {
+                dateKey = DATE_OF_ISSUE_LOW;
+            } else if (columnNameAndShardingValuesMap.containsKey(FLIGHT_DATE_LOW)) {
+                dateKey = FLIGHT_DATE_LOW;
+            }
+            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+            String dateStr =complexKeysShardingValue
+                .getColumnNameAndShardingValuesMap().get(dateKey).toString();
+            dateStr = StringUtils.strip(dateStr, "[]");
+            Date dateOfIssue = sdf.parse(dateStr);
+            int month = getExDate(dateOfIssue, new Date());
+            for (int i = 0; i <= month; i++) {
+                Date newDate = DateUtils.addMonth(dateOfIssue, i);
+                targetTable = DETAIL + DateUtils.dateToString(newDate, "yyyyMM");
+                routTables.add(targetTable);
+            }
+        }
+
+        return routTables;
+    }
+
+    /**
+     * 日期差计算
+     *
+     * @param date    date
+     * @param newDate newDate
+     * @return int
+     */
+    private int getExDate(Date date, Date newDate) {
+        Calendar bef = Calendar.getInstance();
+        Calendar aft = Calendar.getInstance();
+        bef.setTime(date);
+        aft.setTime(newDate);
+        int month = aft.get(2) - bef.get(2);
+        int year = (aft.get(1) - bef.get(1)) * 12;
+        return Math.abs(month + year);
+    }
+}
+```
+
+### 注意事项
+
+1. 强制路由hint、单分片standard、行表达式分片inline、多分片complex，均需要重新实现相关算法，重写dosharding方法。
+2. 如果sql中无分片字段或者无法按路由规则解析到分片字段，就会走全路由。
+
+
+
+3. 规则：解析引擎 - 路由引擎 - 改写引擎 - 执行引擎 - 归并引擎
+4. https://shardingsphere.apache.org/document/legacy/4.x/document/cn/overview/
+
+## 总结
+
+我们团队业务需要用到分表，根据不同月份存入相关月份数据，我使用sharding-sphere多分片来动态更新表名，经过测试/应用，系统比较稳定，解决了繁琐的字段拼接方法以及年份多了以后可能遇到sql越界的问题。
+
+起初，在MybatisConfiguration中覆盖sql拦截器，拦截表名并修改，成功实现了分表的功能。但是报表查询时，使用union all 拼接sql可能导致ORACLE查询时，sql字段太多越界的问题，我研究使用了sharding-sphere方法。-------成功解决了业务复杂带来的技术难题。
+
+还曾经发现了三代架构前端给后端发送数据后，后端无法获取用户输入的参数的值，这些值被封装在filter中，无法取出的问题.
